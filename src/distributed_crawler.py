@@ -1,75 +1,48 @@
+import multiprocessing as mp
+import requests
+from bs4 import BeautifulSoup
 import time
-import random
-from urllib.parse import urlparse
-from collections import defaultdict
+import queue
 
 class DistributedCrawler:
-    def __init__(self, delay=1.0, max_requests_per_domain=10):
-        self.delay = delay  # Minimum delay between requests to same domain
-        self.max_requests_per_domain = max_requests_per_domain
-        self.last_request_time = defaultdict(float)
-        self.domain_request_count = defaultdict(int)
-        self.active_crawlers = set()
+    def __init__(self, num_workers, queue_size):
+        self.num_workers = num_workers
+        self.queue = queue.Queue(maxsize=queue_size)
+        self.results = mp.Queue()
+        self.worker_processes = []
 
-    def register_crawler(self, crawler_id):
-        """Register a new crawler in the swarm"""
-        self.active_crawlers.add(crawler_id)
+    def crawl(self, start_urls):
+        for url in start_urls:
+            self.queue.put(url)
 
-    def unregister_crawler(self, crawler_id):
-        """Remove a crawler from the swarm"""
-        self.active_crawlers.remove(crawler_id)
+        for _ in range(self.num_workers):
+            p = mp.Process(target=self.worker, args=(self.queue, self.results))
+            p.start()
+            self.worker_processes.append(p)
 
-    def can_crawl_url(self, url):
-        """Check if URL can be crawled based on rate limits"""
-        domain = urlparse(url).netloc
-        current_time = time.time()
+        while True:
+            try:
+                result = self.results.get(timeout=1)
+                yield result
+            except queue.Empty:
+                if all(p.exitcode is not None for p in self.worker_processes):
+                    break
 
-        # Check domain request count
-        if self.domain_request_count[domain] >= self.max_requests_per_domain:
-            return False
+    def worker(self, task_queue, results_queue):
+        while True:
+            try:
+                url = task_queue.get(timeout=1)
+            except queue.Empty:
+                return
 
-        # Check if enough time has passed since last request
-        time_since_last = current_time - self.last_request_time[domain]
-        return time_since_last >= self.delay
+            try:
+                response = requests.get(url)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                results_queue.put((url, soup.get_text()))
+            except:
+                pass
 
-    async def crawl_url(self, url, crawler_id):
-        """Crawl a URL with rate limiting and polite behavior"""
-        domain = urlparse(url).netloc
-
-        # Wait if needed to respect rate limits
-        current_time = time.time()
-        time_since_last = current_time - self.last_request_time[domain]
-        if time_since_last < self.delay:
-            await asyncio.sleep(self.delay - time_since_last)
-
-        # Update tracking information
-        self.last_request_time[domain] = time.time()
-        self.domain_request_count[domain] += 1
-
-        try:
-            # Add small random delay for politeness
-            jitter = random.uniform(0.1, 0.5)
-            await asyncio.sleep(jitter)
-
-            # Actual crawling logic would go here
-            # ...
-
-            return {'url': url, 'success': True, 'crawler_id': crawler_id}
-
-        except Exception as e:
-            return {'url': url, 'success': False, 'error': str(e)}
-        finally:
-            self.domain_request_count[domain] -= 1
-
-    def get_crawler_stats(self):
-        """Get statistics about the crawler swarm"""
-        return {
-            'active_crawlers': len(self.active_crawlers),
-            'domains_being_crawled': len(self.domain_request_count),
-            'total_requests_in_progress': sum(self.domain_request_count.values())
-        }
-
-    def reset_stats(self):
-        """Reset all crawling statistics"""
-        self.last_request_time.clear()
-        self.domain_request_count.clear()
+if __name__ == '__main__':
+    crawler = DistributedCrawler(num_workers=4, queue_size=100)
+    for result in crawler.crawl(['https://www.example.com', 'https://www.google.com']):
+        print(result)
