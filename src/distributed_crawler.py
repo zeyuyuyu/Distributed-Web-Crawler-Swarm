@@ -1,48 +1,84 @@
-import multiprocessing as mp
-import requests
-from bs4 import BeautifulSoup
 import time
-import queue
+import random
+from urllib.parse import urlparse
+from collections import defaultdict
 
 class DistributedCrawler:
-    def __init__(self, num_workers, queue_size):
-        self.num_workers = num_workers
-        self.queue = queue.Queue(maxsize=queue_size)
-        self.results = mp.Queue()
-        self.worker_processes = []
-
-    def crawl(self, start_urls):
-        for url in start_urls:
-            self.queue.put(url)
-
-        for _ in range(self.num_workers):
-            p = mp.Process(target=self.worker, args=(self.queue, self.results))
-            p.start()
-            self.worker_processes.append(p)
-
-        while True:
-            try:
-                result = self.results.get(timeout=1)
-                yield result
-            except queue.Empty:
-                if all(p.exitcode is not None for p in self.worker_processes):
-                    break
-
-    def worker(self, task_queue, results_queue):
-        while True:
-            try:
-                url = task_queue.get(timeout=1)
-            except queue.Empty:
-                return
-
-            try:
-                response = requests.get(url)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                results_queue.put((url, soup.get_text()))
-            except:
-                pass
-
-if __name__ == '__main__':
-    crawler = DistributedCrawler(num_workers=4, queue_size=100)
-    for result in crawler.crawl(['https://www.example.com', 'https://www.google.com']):
-        print(result)
+    def __init__(self):
+        self.rate_limits = defaultdict(lambda: {
+            'last_request': 0,
+            'min_interval': 1.0,
+            'backoff_factor': 1.0,
+            'max_retries': 3
+        })
+        self.results = []
+    
+    def adaptive_sleep(self, domain):
+        """Implements intelligent rate limiting with exponential backoff"""
+        domain_info = self.rate_limits[domain]
+        current_time = time.time()
+        elapsed = current_time - domain_info['last_request']
+        
+        # Calculate required wait time
+        wait_time = max(0, domain_info['min_interval'] * domain_info['backoff_factor'] - elapsed)
+        
+        if wait_time > 0:
+            time.sleep(wait_time + random.uniform(0.1, 0.5))  # Add jitter
+            
+        domain_info['last_request'] = time.time()
+    
+    def handle_response(self, domain, success):
+        """Adjusts rate limiting based on server response"""
+        if success:
+            # Gradually reduce backoff on success
+            self.rate_limits[domain]['backoff_factor'] = max(
+                1.0,
+                self.rate_limits[domain]['backoff_factor'] * 0.8
+            )
+        else:
+            # Increase backoff on failure
+            self.rate_limits[domain]['backoff_factor'] *= 2.0
+    
+    async def crawl(self, url, depth=2):
+        """Main crawling method with intelligent rate limiting"""
+        domain = urlparse(url).netloc
+        
+        try:
+            # Apply rate limiting
+            self.adaptive_sleep(domain)
+            
+            # Simulate request (replace with actual HTTP request)
+            success = random.random() > 0.2  # 80% success rate simulation
+            
+            # Update rate limiting based on response
+            self.handle_response(domain, success)
+            
+            if success:
+                # Process successful response
+                self.results.append({
+                    'url': url,
+                    'depth': depth,
+                    'timestamp': time.time()
+                })
+                
+                if depth > 0:
+                    # Simulate finding new URLs (replace with actual parsing)
+                    new_urls = [f"{url}/page{i}" for i in range(3)]
+                    for new_url in new_urls:
+                        await self.crawl(new_url, depth - 1)
+            
+            return success
+            
+        except Exception as e:
+            self.handle_response(domain, False)
+            print(f"Error crawling {url}: {str(e)}")
+            return False
+    
+    def get_results(self):
+        """Return crawling results"""
+        return self.results
+    
+    def reset(self):
+        """Reset crawler state"""
+        self.rate_limits.clear()
+        self.results.clear()
